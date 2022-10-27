@@ -1,12 +1,14 @@
 import GitLabAPI from "./gitlab/GitLabAPI"
-import { Platform, Comment } from "./platform"
+import { Comment, Platform } from "./platform"
 import { GitDSL, GitJSONDSL } from "../dsl/GitDSL"
 import { GitCommit } from "../dsl/Commit"
-import { GitLabDSL, GitLabJSONDSL, GitLabNote } from "../dsl/GitLabDSL"
-
+import { GitLabDiscussion, GitLabDSL, GitLabJSONDSL, GitLabNote } from "../dsl/GitLabDSL"
 import { debug } from "../debug"
 import { dangerIDToString } from "../runner/templates/githubIssueTemplate"
+
 const d = debug("GitLab")
+
+const useThreads = process.env.DANGER_GITLAB_USE_THREADS === "1" || process.env.DANGER_GITLAB_USE_THREADS === "true"
 
 class GitLab implements Platform {
   public readonly name: string
@@ -95,51 +97,59 @@ class GitLab implements Platform {
   updateOrCreateComment = async (dangerID: string, newComment: string): Promise<string> => {
     d("updateOrCreateComment", { dangerID, newComment })
 
-    const notes: GitLabNote[] = await this.getDangerNotes(dangerID)
-
-    let note: GitLabNote
-
-    if (notes.length) {
-      // update the first
-      note = await this.api.updateMergeRequestNote(notes[0].id, newComment)
-
-      // delete the rest
-      for (let deleteme of notes) {
-        if (deleteme === notes[0]) {
-          continue
-        }
-
-        await this.api.deleteMergeRequestNote(deleteme.id)
-      }
+    let notesToDelete: GitLabNote[]
+    let existingNote: GitLabNote | undefined
+    if (useThreads) {
+      const discussions = await this.getDangerDiscussions(dangerID)
+      const firstDiscussion = discussions.shift()
+      existingNote = firstDiscussion?.notes[0]
+      // Delete all notes from all other danger discussions (discussions cannot be deleted as a whole):
+      notesToDelete = this.reduceNotesFromDiscussions(discussions)
     } else {
-      // create a new note
-      note = await this.api.createMergeRequestNote(newComment)
+      notesToDelete = await this.getDangerNotes(dangerID)
+      existingNote = notesToDelete.shift()
+    }
+    await this.deleteNotes(notesToDelete) //delete the rest
+
+    let newOrUpdatedNote: GitLabNote
+
+    if (existingNote) {
+      // update the existing comment
+      newOrUpdatedNote = await this.api.updateMergeRequestNote(existingNote.id, newComment)
+    } else {
+      // create a new comment
+      newOrUpdatedNote = await this.createComment(newComment)
     }
 
     // create URL from note
     // "https://gitlab.com/group/project/merge_requests/154#note_132143425"
-    return `${this.api.mergeRequestURL}#note_${note.id}`
+    return `${this.api.mergeRequestURL}#note_${newOrUpdatedNote.id}`
   }
 
-  createComment = async (comment: string): Promise<any> => {
+  createComment = async (comment: string): Promise<GitLabNote> => {
     d("createComment", { comment })
+    if (useThreads) {
+      return (await this.api.createMergeRequestDiscussion(comment)).notes[0]
+    }
     return this.api.createMergeRequestNote(comment)
   }
 
-  createInlineComment = async (git: GitDSL, comment: string, path: string, line: number): Promise<string> => {
+  createInlineComment = async (git: GitDSL, comment: string, path: string, line: number): Promise<GitLabDiscussion> => {
     d("createInlineComment", { git, comment, path, line })
 
     const mr = await this.api.getMergeRequestInfo()
 
     return this.api.createMergeRequestDiscussion(comment, {
-      position_type: "text",
-      base_sha: mr.diff_refs.base_sha,
-      start_sha: mr.diff_refs.start_sha,
-      head_sha: mr.diff_refs.head_sha,
-      old_path: path,
-      old_line: null,
-      new_path: path,
-      new_line: line,
+      position: {
+        position_type: "text",
+        base_sha: mr.diff_refs.base_sha,
+        start_sha: mr.diff_refs.start_sha,
+        head_sha: mr.diff_refs.head_sha,
+        old_path: path,
+        old_line: null,
+        new_path: path,
+        new_line: line,
+      },
     })
   }
 
@@ -156,26 +166,56 @@ class GitLab implements Platform {
   }
 
   deleteMainComment = async (dangerID: string): Promise<boolean> => {
-    const notes = await this.getDangerNotes(dangerID)
-    for (let note of notes) {
-      d("deleteMainComment", { id: note.id })
+    let notes: GitLabNote[]
+    if (useThreads) {
+      //There is no API to delete entire discussion. They can only be deleted fully by deleting every note:
+      const discussions = await this.getDangerDiscussions(dangerID)
+      notes = this.reduceNotesFromDiscussions(discussions)
+    } else {
+      notes = await this.getDangerNotes(dangerID)
+    }
+    return await this.deleteNotes(notes)
+  }
+
+  deleteNotes = async (notes: GitLabNote[]): Promise<boolean> => {
+    for (const note of notes) {
+      d("deleteNotes", { id: note.id })
       await this.api.deleteMergeRequestNote(note.id)
     }
 
     return notes.length > 0
   }
 
-  getDangerNotes = async (dangerID: string): Promise<GitLabNote[]> => {
-    const { id: dangerUserId } = await this.api.getUser()
-    const notes: GitLabNote[] = await this.api.getMergeRequestNotes()
+  /**
+   * Only fetches the discussions where danger owns the top note
+   */
+  getDangerDiscussions = async (dangerID: string): Promise<GitLabDiscussion[]> => {
+    const noteFilter = await this.getDangerNoteFilter(dangerID, "DiscussionNote")
+    const discussions: GitLabDiscussion[] = await this.api.getMergeRequestDiscussions()
+    return discussions.filter(({ notes }) => notes.length && noteFilter(notes[0]))
+  }
 
-    return notes.filter(
-      ({ author: { id }, body, system, type }: GitLabNote) =>
-        !system && // system notes are generated when the user interacts with the UI e.g. changing a PR title
-        type == null && // we only want "normal" comments on the main body of the MR;
+  reduceNotesFromDiscussions = (discussions: GitLabDiscussion[]): GitLabNote[] => {
+    return discussions.reduce<GitLabNote[]>((acc, { notes }) => [...acc, ...notes], [])
+  }
+
+  getDangerNotes = async (dangerID: string): Promise<GitLabNote[]> => {
+    const noteFilter = await this.getDangerNoteFilter(dangerID, null) //"null" are normal notes/comments
+    const notes: GitLabNote[] = await this.api.getMergeRequestNotes()
+    return notes.filter(noteFilter)
+  }
+
+  getDangerNoteFilter = async (
+    dangerID: string,
+    wantedType: GitLabNote["type"],
+  ): Promise<(note: GitLabNote) => boolean> => {
+    const { id: dangerUserId } = await this.api.getUser()
+    return ({ author: { id }, body, system, type }: GitLabNote): boolean => {
+      return !system && // system notes are generated when the user interacts with the UI e.g. changing a PR title
+        type === wantedType &&
         id === dangerUserId &&
-        body!.includes(dangerIDToString(dangerID)) // danger-id-(dangerID) is included in a hidden comment in the githubIssueTemplate
-    )
+        body!.includes(dangerIDToString(dangerID))
+    }
   }
 
   updateStatus = async (): Promise<boolean> => {
