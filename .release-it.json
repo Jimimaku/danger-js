@@ -1,12 +1,13 @@
 {
-  "github": {
-    "release": true,
-    "assets": "brew-distribution/*.zip"
-  },
-  "buildCommand": "yarn package",
+  "_": "CI will switch the release here to true",
+  "github": { "release": false, "assets": "brew-distribution/*.zip" },
+  "git": { "requireCleanWorkingDir": false },
+  "buildCommand": "yarn package:x64; yarn package:arm64",
   "hooks": {
     "before:bump": "yarn declarations; yarn build:schemas",
-    "after:bump": "yarn package",
-    "after:release": "VERSION=${version} scripts/create-homebrew-tap-pr.sh"
+    "after:release": "gh workflow run release.yml -f version=${version}",
+    "_": "CI will remove the _ from both of the below lines",
+    "_after:bump": "yarn package:x64; yarn package:arm64",
+    "_after:release": "export VERSION=${version}; echo 'VERSION=${version}' >> $GITHUB_ENV"
   }
 }

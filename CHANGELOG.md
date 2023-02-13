@@ -16,7 +16,25 @@
 
 <!-- Your comment below this -->
 
+
 <!-- Your comment above this -->
+
+## 11.2.3
+
+Turns on skipLibCheck so that an @types change doesn't break deploys to homebrew
+
+## 11.2.2
+
+Reverts a change for GitHub Actions which was likely causing duplicate comments #1337
+
+## 11.2.1
+
+- Updates jsonwebtoken due to security issues
+- Support arm64 binary generation for Apple silicon users [#1342](https://github.com/danger/danger-js/pull/1342) [@pepix]
+
+## 11.2.1
+
+- Bug fix for bitbucket bot detection ignoring case #1291
 
 ## 11.2.0
 
