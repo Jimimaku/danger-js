@@ -144,7 +144,7 @@
     "async-retry": "1.2.3",
     "chalk": "^2.3.0",
     "commander": "^2.18.0",
-    "core-js": "^3.8.2",
+    "core-js": "^3.35.1",
     "debug": "^4.1.1",
     "fast-json-patch": "^3.0.0-1",
     "get-stdin": "^6.0.0",
