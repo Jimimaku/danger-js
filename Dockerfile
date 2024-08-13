@@ -1,4 +1,4 @@
-FROM node:18.9.0-slim
+FROM node:hydrogen-bookworm-slim
 
 LABEL maintainer="Orta Therox"
 LABEL "com.github.actions.name"="Danger JS Action"
